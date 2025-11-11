@@ -104,6 +104,11 @@ SESSION = make_session()
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", module="pkg_resources")
+warnings.filterwarnings(
+    "ignore",
+    message=r"pkg_resources is deprecated as an API.*",
+    category=UserWarning,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -253,27 +258,41 @@ def _norm_labels(df: pd.DataFrame) -> pd.Series:
     return df["account_nm"].astype(str).str.replace(r"\s+", "", regex=True).str.lower()
 
 
-def pick_amount(df: Optional[pd.DataFrame], keys: Iterable[str]) -> Optional[float]:
+def pick_amount(
+    df: Optional[pd.DataFrame],
+    names: Optional[Iterable[str]] = None,
+    ids: Optional[Iterable[str]] = None,
+) -> Optional[float]:
     if df is None or "account_nm" not in df.columns:
         return None
-    labels = _norm_labels(df)
 
-    for key in keys:
-        key_norm = str(key).replace(" ", "").lower()
-        hit = df[labels == key_norm]
-        if len(hit) > 0:
-            values = pd.to_numeric(hit["thstrm_amount"], errors="coerce").dropna()
-            if len(values) > 0:
-                return float(values.iloc[0])
+    if ids and "account_id" in df.columns:
+        for account_id in ids:
+            hit = df[df["account_id"].astype(str) == str(account_id)]
+            if len(hit) > 0:
+                values = pd.to_numeric(hit["thstrm_amount"], errors="coerce").dropna()
+                if len(values) > 0:
+                    return float(values.iloc[0])
 
-    for key in keys:
-        key_norm = str(key).replace(" ", "").lower()
-        mask = labels.str.contains(key_norm, regex=False)
-        hit = df[mask]
-        if len(hit) > 0:
-            values = pd.to_numeric(hit["thstrm_amount"], errors="coerce").dropna()
-            if len(values) > 0:
-                return float(values.iloc[0])
+    if names:
+        labels = _norm_labels(df)
+
+        for key in names:
+            key_norm = str(key).replace(" ", "").lower()
+            hit = df[labels == key_norm]
+            if len(hit) > 0:
+                values = pd.to_numeric(hit["thstrm_amount"], errors="coerce").dropna()
+                if len(values) > 0:
+                    return float(values.iloc[0])
+
+        for key in names:
+            key_norm = str(key).replace(" ", "").lower()
+            mask = labels.str.contains(key_norm, regex=False)
+            hit = df[mask]
+            if len(hit) > 0:
+                values = pd.to_numeric(hit["thstrm_amount"], errors="coerce").dropna()
+                if len(values) > 0:
+                    return float(values.iloc[0])
     return None
 
 
@@ -296,7 +315,22 @@ def collect_financials(corp_code: str) -> Dict[str, Optional[float]]:
         "보험영업수익",
     ]
     keys_net = ["당기순이익", "순이익", "net income", "연결당기순이익", "분기순이익"]
+    ids_sales = [
+        "ifrs-full_Revenue",
+        "ifrs-full_SalesRevenueNet",
+        "ifrs-full_RevenueFromContractsWithCustomers",
+        "dart_TotalRevenue",
+    ]
+    ids_net = [
+        "ifrs-full_ProfitLoss",
+        "dart_ProfitLoss",
+        "ifrs-full_ProfitLossAttributableToOwnersOfParent",
+    ]
     keys_rnd = ["연구개발", "연구개발비", "r&d", "개발비"]
+    ids_rnd = [
+        "dart_ResearchAndDevelopmentExpense",
+        "dart_TotalResearchAndDevelopmentExpense",
+    ]
 
     cash_exact = [
         "현금및현금성자산",
@@ -330,9 +364,9 @@ def collect_financials(corp_code: str) -> Dict[str, Optional[float]]:
         time.sleep(PAUSE_DART)
         if df_year is None:
             continue
-        sales = pick_amount(df_year, keys_sales)
-        net_income = pick_amount(df_year, keys_net)
-        rnd = pick_amount(df_year, keys_rnd)
+        sales = pick_amount(df_year, keys_sales, ids_sales)
+        net_income = pick_amount(df_year, keys_net, ids_net)
+        rnd = pick_amount(df_year, keys_rnd, ids_rnd)
         if rnd is not None and rnd_latest is None:
             rnd_latest = rnd
         values.append((sales, net_income))
@@ -350,7 +384,7 @@ def collect_financials(corp_code: str) -> Dict[str, Optional[float]]:
             time.sleep(PAUSE_DART / 2)
             if dfq is None:
                 continue
-            cash = pick_amount(dfq, cash_exact)
+            cash = pick_amount(dfq, cash_exact, ["ifrs-full_CashAndCashEquivalents"])
             if cash is None:
                 pieces = []
                 for key in cash_alt_components:
@@ -359,10 +393,10 @@ def collect_financials(corp_code: str) -> Dict[str, Optional[float]]:
                         pieces.append(value)
                 if pieces:
                     cash = float(np.nansum(pieces))
-            assets = pick_amount(dfq, asset_exact)
+            assets = pick_amount(dfq, asset_exact, ["ifrs-full_Assets"])
             if assets is None:
-                debt = pick_amount(dfq, debt_exact)
-                equity = pick_amount(dfq, equity_exact)
+                debt = pick_amount(dfq, debt_exact, ["ifrs-full_Liabilities"])
+                equity = pick_amount(dfq, equity_exact, ["ifrs-full_Equity"])
                 if debt is not None and equity is not None:
                     assets = float(debt) + float(equity)
             if (cash is not None) or (assets is not None):
@@ -376,7 +410,7 @@ def collect_financials(corp_code: str) -> Dict[str, Optional[float]]:
         time.sleep(PAUSE_DART / 2)
         if df_last_year is not None:
             if cash is None:
-                c_exact = pick_amount(df_last_year, cash_exact)
+                c_exact = pick_amount(df_last_year, cash_exact, ["ifrs-full_CashAndCashEquivalents"])
                 if c_exact is None:
                     pieces = []
                     for key in cash_alt_components:
@@ -387,10 +421,10 @@ def collect_financials(corp_code: str) -> Dict[str, Optional[float]]:
                         c_exact = float(np.nansum(pieces))
                 cash = c_exact
             if assets is None:
-                a_exact = pick_amount(df_last_year, asset_exact)
+                a_exact = pick_amount(df_last_year, asset_exact, ["ifrs-full_Assets"])
                 if a_exact is None:
-                    debt = pick_amount(df_last_year, debt_exact)
-                    equity = pick_amount(df_last_year, equity_exact)
+                    debt = pick_amount(df_last_year, debt_exact, ["ifrs-full_Liabilities"])
+                    equity = pick_amount(df_last_year, equity_exact, ["ifrs-full_Equity"])
                     if debt is not None and equity is not None:
                         a_exact = float(debt) + float(equity)
                 assets = a_exact
@@ -422,12 +456,18 @@ def dart_quarter_sales_series(corp_code: str):
         "영업수익(보험)",
         "보험영업수익",
     ]
+    ids = [
+        "ifrs-full_Revenue",
+        "ifrs-full_SalesRevenueNet",
+        "ifrs-full_RevenueFromContractsWithCustomers",
+        "dart_TotalRevenue",
+    ]
     this_year = datetime.today().year
 
     def quarter_sum(year: int, rc: str) -> Optional[float]:
         df, _ = dart_fs_single_try(corp_code, year, rc)
         time.sleep(PAUSE_DART / 3)
-        return pick_amount(df, keys) if df is not None else None
+        return pick_amount(df, keys, ids) if df is not None else None
 
     for base_year in [this_year, this_year - 1]:
         q1 = quarter_sum(base_year, "1101")
